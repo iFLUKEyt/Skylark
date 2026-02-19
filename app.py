@@ -15,6 +15,9 @@ from skylark.logic import (
 
 st.set_page_config(page_title="Skylark Drone Ops Coordinator", layout="wide")
 
+import logging
+logger = logging.getLogger("skylark.app")
+
 # Attempt to load data from Google Sheets. If this fails (missing creds,
 # sharing, or tab name mismatch) we catch the error and continue with empty
 # tables so the UI remains usable and the user can click "Connect Sheets".
@@ -50,6 +53,27 @@ with st.expander("Missions"):
     st.dataframe(df_missions)
 
 st.sidebar.header("Queries & Actions")
+
+# Status panel: shows Sheets connectivity and logging path
+with st.sidebar.expander("Status & Connectivity", expanded=True):
+    try:
+        from skylark import sheets as _sheets
+        conn = _sheets.check_connectivity(st.session_state.get('sheet_id', DEFAULT_SHEET_ID))
+        st.write("**gspread available:**", conn.get('has_gs'))
+        st.write("**Credentials loaded:**", conn.get('creds_loaded'))
+        cs = conn.get('creds_source') or 'none'
+        st.write("**Creds source:**", cs)
+        ce = conn.get('client_email')
+        if ce:
+            st.write("**Service account:**", ce)
+        st.write("**Can open spreadsheet:**", conn.get('can_open'))
+        if conn.get('worksheets'):
+            st.write("**Worksheets:**", conn.get('worksheets'))
+        if conn.get('error'):
+            st.warning(f"Sheets error: {conn.get('error')}")
+    except Exception as e:
+        logger.exception('Failed to render status panel')
+        st.error('Status unavailable: ' + str(e))
 
 # Google Sheets connection
 DEFAULT_SHEET_ID = '1n7qmPBnCE6ozUZmDXQyP-LKS-prE-0DMz-dLUsu7FLE'

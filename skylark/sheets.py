@@ -13,6 +13,7 @@ from typing import Optional
 import os
 import json
 import pandas as pd
+import logging
 
 try:
     import gspread
@@ -49,6 +50,77 @@ def _get_credentials():
         except Exception:
             pass
     return None
+
+
+def check_connectivity(sheet_id: str):
+    """Return a dict with diagnostics about Sheets connectivity.
+
+    Keys:
+    - has_gs: whether gspread/google-auth are importable
+    - creds_loaded: whether credentials were found
+    - creds_source: 'env_json'|'file'|None
+    - client_email: service account email (masked) if available
+    - can_open: whether the spreadsheet could be opened
+    - worksheets: list of worksheet titles when available
+    - error: error message if any
+    """
+    log = logging.getLogger(__name__)
+    out = {
+        'has_gs': HAS_GS,
+        'creds_loaded': False,
+        'creds_source': None,
+        'client_email': None,
+        'can_open': False,
+        'worksheets': [],
+        'error': None,
+    }
+    if not HAS_GS:
+        out['error'] = 'gspread/google-auth not installed.'
+        return out
+
+    # Check env var payload first
+    json_payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+    if json_payload:
+        try:
+            info = json.loads(json_payload)
+            out['creds_loaded'] = True
+            out['creds_source'] = 'env_json'
+            out['client_email'] = info.get('client_email')
+        except Exception as e:
+            out['error'] = f'Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e}'
+            return out
+
+    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    if not out['creds_loaded'] and creds_path:
+        if os.path.exists(creds_path):
+            try:
+                with open(creds_path, 'r', encoding='utf-8') as f:
+                    info = json.load(f)
+                out['creds_loaded'] = True
+                out['creds_source'] = 'file'
+                out['client_email'] = info.get('client_email')
+            except Exception as e:
+                out['error'] = f'Failed to load credentials file: {e}'
+                return out
+
+    if not out['creds_loaded']:
+        out['error'] = 'No credentials found in GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS.'
+        return out
+
+    try:
+        creds = _get_credentials()
+        if creds is None:
+            out['error'] = 'Credentials were detected but failed to build Credentials object.'
+            return out
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(sheet_id)
+        out['can_open'] = True
+        out['worksheets'] = [ws.title for ws in sh.worksheets()]
+    except Exception as e:
+        log.exception('Sheets connectivity check failed')
+        out['error'] = str(e)
+
+    return out
 
 
 def read_sheet(sheet_id: str, sheet_name: str = 'Sheet1') -> Optional[pd.DataFrame]:
