@@ -16,6 +16,7 @@ from skylark.logic import (
 st.set_page_config(page_title="Skylark Drone Ops Coordinator", layout="wide")
 
 import logging
+import os
 logger = logging.getLogger("skylark.app")
 
 # Attempt to load data from Google Sheets. If this fails (missing creds,
@@ -71,6 +72,19 @@ with st.sidebar.expander("Status & Connectivity", expanded=True):
             st.write("**Worksheets:**", conn.get('worksheets'))
         if conn.get('error'):
             st.warning(f"Sheets error: {conn.get('error')}")
+        # Show which relevant environment variables are present (names only)
+        present_env = [k for k in (
+            'GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_JSON',
+            'GOOGLE_APPLICATION_CREDENTIALS') if os.environ.get(k)]
+        st.write("**Env vars present:**", present_env or 'none')
+
+        # If Streamlit secrets exist, list their keys so user can confirm the name used
+        try:
+            import streamlit as _st
+            secret_keys = list(_st.secrets.keys()) if hasattr(_st, 'secrets') else []
+            st.write("**st.secrets keys:**", secret_keys or 'none')
+        except Exception:
+            st.write("**st.secrets keys:**", 'unavailable')
     except Exception as e:
         logger.exception('Failed to render status panel')
         st.error('Status unavailable: ' + str(e))
