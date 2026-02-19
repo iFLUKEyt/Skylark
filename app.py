@@ -1,3 +1,6 @@
+from skylark.logging import setup_logging
+setup_logging()
+
 import streamlit as st
 from skylark.data import load_dataframes, save_pilots_df
 from skylark import sheets
