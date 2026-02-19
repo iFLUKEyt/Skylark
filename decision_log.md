@@ -1,7 +1,7 @@
 Decision Log — Skylark Drone Ops Coordinator Prototype
 
 Assumptions
-- The provided CSVs act as the canonical local dataset for the prototype. Google Sheets sync is implemented as an optional integration that requires user-provided service account credentials.
+- The provided CSVs act as the canonical local dataset for the prototype. Google Sheets sync is implemented as an integration that requires user-provided service account credentials.
 - Missions may optionally include `assigned_pilot` and `assigned_drone` columns; matching functions return candidates but do not auto-write assignments.
 - Weather compatibility is simplified: any `weather_resistance` string containing `IP` is considered rain-capable.
 
