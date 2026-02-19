@@ -11,6 +11,7 @@ This prototype does not require credentials to run locally using the CSVs.
 """
 from typing import Optional
 import os
+import json
 import pandas as pd
 
 try:
@@ -21,17 +22,41 @@ except Exception:
     HAS_GS = False
 
 
-def read_sheet(sheet_id: str, sheet_name: str = 'Sheet1') -> Optional[pd.DataFrame]:
+def _get_credentials():
+    """Return google.oauth2.service_account.Credentials built from either:
+    - a file path in `GOOGLE_APPLICATION_CREDENTIALS` (existing behavior), or
+    - a JSON string in `GOOGLE_SERVICE_ACCOUNT_JSON` (useful for cloud secrets).
+    """
     if not HAS_GS:
-        return None
-    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-    if not creds_path or not os.path.exists(creds_path):
         return None
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
     ]
-    creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+    # Prefer JSON payload in env var (Streamlit Cloud secrets)
+    json_payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+    if json_payload:
+        try:
+            info = json.loads(json_payload)
+            return Credentials.from_service_account_info(info, scopes=scopes)
+        except Exception:
+            pass
+    # Fallback to file path
+    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    if creds_path and os.path.exists(creds_path):
+        try:
+            return Credentials.from_service_account_file(creds_path, scopes=scopes)
+        except Exception:
+            pass
+    return None
+
+
+def read_sheet(sheet_id: str, sheet_name: str = 'Sheet1') -> Optional[pd.DataFrame]:
+    if not HAS_GS:
+        return None
+    creds = _get_credentials()
+    if creds is None:
+        return None
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
     ws = sh.worksheet(sheet_name)
@@ -42,14 +67,9 @@ def read_sheet(sheet_id: str, sheet_name: str = 'Sheet1') -> Optional[pd.DataFra
 def write_sheet(df: pd.DataFrame, sheet_id: str, sheet_name: str = 'Sheet1') -> bool:
     if not HAS_GS:
         return False
-    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-    if not creds_path or not os.path.exists(creds_path):
+    creds = _get_credentials()
+    if creds is None:
         return False
-    scopes = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive',
-    ]
-    creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
     try:
