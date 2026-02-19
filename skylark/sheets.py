@@ -57,10 +57,61 @@ def _get_credentials():
             pass
     if json_payload:
         try:
+            # If the secret is already a dict (Streamlit may parse TOML tables), use directly
+            if isinstance(json_payload, dict):
+                return Credentials.from_service_account_info(json_payload, scopes=scopes)
             info = json.loads(json_payload)
             return Credentials.from_service_account_info(info, scopes=scopes)
-        except Exception:
-            pass
+        except Exception as e:
+            # Try to repair common issue: unescaped literal newlines inside the private_key value
+            try:
+                s = json_payload
+                key = '"private_key"'
+                i = s.find(key)
+                if i != -1:
+                    # find the colon after private_key
+                    j = s.find(':', i + len(key))
+                    if j != -1:
+                        # find the starting quote of the value
+                        k = s.find('"', j)
+                        if k != -1:
+                            # scan to find the matching closing quote, repairing literal newlines inside
+                            out_chars = []
+                            idx = 0
+                            repaired = False
+                            # copy up to k
+                            prefix = s[:k+1]
+                            idx = k+1
+                            val_chars = []
+                            esc = False
+                            while idx < len(s):
+                                ch = s[idx]
+                                if esc:
+                                    val_chars.append('\\' + ch if ch == 'n' else '\\' + ch)
+                                    esc = False
+                                else:
+                                    if ch == '\\':
+                                        esc = True
+                                        # we will handle the next char in escaped branch
+                                    elif ch == '"':
+                                        # end of string
+                                        idx += 1
+                                        break
+                                    elif ch == '\n' or ch == '\r':
+                                        # replace literal newline with escape sequence
+                                        val_chars.append('\\n')
+                                        repaired = True
+                                    else:
+                                        val_chars.append(ch)
+                                idx += 1
+                            # reconstruct candidate JSON
+                            candidate = prefix + ''.join(val_chars) + s[idx-1:]
+                            info = json.loads(candidate)
+                            return Credentials.from_service_account_info(info, scopes=scopes)
+            except Exception:
+                pass
+            # fallthrough
+            return None
     # Fallback to file path
     creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
     # also look in Streamlit secrets for a path-like entry
