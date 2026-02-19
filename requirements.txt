@@ -3,3 +3,4 @@ altair==4.2.2
 gspread
 google-auth
 pandas
+./imghdr_pkg
