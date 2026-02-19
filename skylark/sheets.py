@@ -9,11 +9,27 @@ To enable Google Sheets sync:
 
 This prototype does not require credentials to run locally using the CSVs.
 """
-from typing import Optional
+"""Google Sheets helpers tuned for Streamlit Cloud deployments.
+
+This module reads service-account credentials from `st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]`
+or from the environment variable `GOOGLE_SERVICE_ACCOUNT_JSON`. It safely parses
+the JSON and ensures the `private_key` contains actual newlines (not literal "\\n"
+sequences) before building `google.oauth2.service_account.Credentials`.
+
+Deployment notes:
+- This implementation intentionally avoids reading credential files from disk
+  (no `from_service_account_file`) so it is safe for Streamlit Cloud.
+- The app expects a TOML triple-quoted JSON in Streamlit Secrets, or the raw
+  JSON string in the environment variable `GOOGLE_SERVICE_ACCOUNT_JSON`.
+"""
+
+from typing import Optional, Dict, Any
 import os
 import json
-import pandas as pd
 import logging
+import pandas as pd
+
+log = logging.getLogger(__name__)
 
 try:
     import gspread
@@ -23,73 +39,145 @@ except Exception:
     HAS_GS = False
 
 
-def _get_credentials():
-    """Return google.oauth2.service_account.Credentials built from either:
-    - a file path in `GOOGLE_APPLICATION_CREDENTIALS` (existing behavior), or
-    - a JSON string in `GOOGLE_SERVICE_ACCOUNT_JSON` (useful for cloud secrets).
+def _load_service_account_info_from_secrets() -> Optional[Dict[str, Any]]:
+    """Load service account JSON from Streamlit secrets or environment.
+
+    Returns a dict suitable for `Credentials.from_service_account_info` or None.
+    Provides helpful error messages when parsing fails.
+    """
+    # Try Streamlit secrets first (if Streamlit is available in the runtime)
+    payload = None
+    try:
+        import streamlit as st
+        # Prefer exact key name
+        if 'GOOGLE_SERVICE_ACCOUNT_JSON' in st.secrets:
+            payload = st.secrets['GOOGLE_SERVICE_ACCOUNT_JSON']
+        # Allow nested secret tables like st.secrets['google']['service_account']
+        elif 'google' in st.secrets and 'service_account' in st.secrets['google']:
+            payload = st.secrets['google']['service_account']
+    except Exception:
+        # Streamlit not available or st.secrets not present; fall through
+        payload = None
+
+    # Next, try environment variable
+    if payload is None:
+        payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+
+    if not payload:
+        log.debug('No service account JSON found in st.secrets or GOOGLE_SERVICE_ACCOUNT_JSON env var')
+        return None
+
+    # If payload is already a dict (Streamlit may parse TOML into dict), use it
+    if isinstance(payload, dict):
+        info = payload
+    else:
+        # payload is expected to be a JSON string; try to parse
+        try:
+            info = json.loads(payload)
+        except Exception as e:
+            # Try a common repair: replace literal unescaped newlines inside the private_key
+            try:
+                s = payload
+                # Replace occurrences of '\\n' (two characters) with actual newlines
+                # after extracting JSON-like content. Many users paste JSON with escaped
+                # newlines; others paste a raw block that can confuse parsing. Attempt
+                # a tolerant repair by replacing literal "\\n" sequences so json.loads succeeds.
+                repaired = s.replace('\\n', '\n')
+                info = json.loads(repaired)
+            except Exception as e2:
+                log.exception('Failed to parse service account JSON from secrets')
+                raise RuntimeError(f'Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e2}') from e2
+
+    # Ensure private_key uses real newlines (not literal backslash+n sequences)
+    try:
+        pk = info.get('private_key')
+        if isinstance(pk, str) and '\\n' in pk:
+            info['private_key'] = pk.replace('\\n', '\n')
+    except Exception:
+        # Non-fatal; continue
+        pass
+
+    return info
+
+
+def _get_credentials() -> Optional[Credentials]:
+    """Build google.oauth2.service_account.Credentials from secrets.
+
+    Returns Credentials or None. Raises RuntimeError with helpful message
+    when parsing fails.
     """
     if not HAS_GS:
-        return None
+        raise RuntimeError('gspread/google-auth not installed')
+
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
     ]
-    # Prefer JSON payload from environment variable or Streamlit secrets
-    # Streamlit Cloud typically exposes secrets via `st.secrets`, so check
-    # there as well if Streamlit is available.
-    json_payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
-    # Try common alternate names
-    if not json_payload:
-        json_payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT') or os.environ.get('SERVICE_ACCOUNT_JSON')
-    # Try Streamlit secrets if present
-    if not json_payload:
+
+    info = _load_service_account_info_from_secrets()
+    if not info:
+        raise RuntimeError('No service account JSON found in st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"] or GOOGLE_SERVICE_ACCOUNT_JSON env var')
+
+    try:
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        return creds
+    except Exception as e:
+        log.exception('Failed to build Credentials from service account info')
+        raise RuntimeError(f'Failed to build credentials from provided JSON: {e}') from e
+
+
+def read_sheet(sheet_id: str, sheet_name: str = 'Sheet1') -> Optional[pd.DataFrame]:
+    """Open the spreadsheet and return the worksheet contents as a DataFrame.
+
+    Raises RuntimeError with explanatory messages on failure.
+    """
+    if not HAS_GS:
+        raise RuntimeError('gspread/google-auth libraries are not available')
+
+    creds = _get_credentials()
+    gc = gspread.authorize(creds)
+    try:
+        sh = gc.open_by_key(sheet_id)
+    except Exception as e:
+        log.exception('Failed to open spreadsheet by key')
+        raise RuntimeError(f'Failed to open spreadsheet {sheet_id}: {e}') from e
+
+    try:
+        ws = sh.worksheet(sheet_name)
+        data = ws.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        log.exception('Failed to read worksheet')
+        raise RuntimeError(f'Failed to read worksheet {sheet_name}: {e}') from e
+
+
+def write_sheet(df: pd.DataFrame, sheet_id: str, sheet_name: str = 'Sheet1') -> bool:
+    """Write a DataFrame to the given worksheet. Returns True on success.
+    Raises RuntimeError on failure with helpful messages.
+    """
+    if not HAS_GS:
+        raise RuntimeError('gspread/google-auth libraries are not available')
+
+    creds = _get_credentials()
+    gc = gspread.authorize(creds)
+    try:
+        sh = gc.open_by_key(sheet_id)
+    except Exception as e:
+        log.exception('Failed to open spreadsheet for write')
+        raise RuntimeError(f'Failed to open spreadsheet {sheet_id}: {e}') from e
+
+    try:
         try:
-            import streamlit as _st
-            # check several common keys that users may name their secret
-            for key in ('GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_JSON'):
-                if key in _st.secrets:
-                    json_payload = _st.secrets[key]
-                    break
-            # also allow nested secret like st.secrets['google']['service_account']
-            if not json_payload and 'google' in _st.secrets and 'service_account' in _st.secrets['google']:
-                json_payload = _st.secrets['google']['service_account']
+            ws = sh.worksheet(sheet_name)
         except Exception:
-            pass
-    if json_payload:
-        try:
-            # If the secret is already a dict (Streamlit may parse TOML tables), use directly
-            if isinstance(json_payload, dict):
-                return Credentials.from_service_account_info(json_payload, scopes=scopes)
-            info = json.loads(json_payload)
-            return Credentials.from_service_account_info(info, scopes=scopes)
-        except Exception as e:
-            # Try to repair common issue: unescaped literal newlines inside the private_key value
-            try:
-                s = json_payload
-                key = '"private_key"'
-                i = s.find(key)
-                if i != -1:
-                    # find the colon after private_key
-                    j = s.find(':', i + len(key))
-                    if j != -1:
-                        # find the starting quote of the value
-                        k = s.find('"', j)
-                        if k != -1:
-                            # scan to find the matching closing quote, repairing literal newlines inside
-                            out_chars = []
-                            idx = 0
-                            repaired = False
-                            # copy up to k
-                            prefix = s[:k+1]
-                            idx = k+1
-                            val_chars = []
-                            esc = False
-                            while idx < len(s):
-                                ch = s[idx]
-                                if esc:
-                                    val_chars.append('\\' + ch if ch == 'n' else '\\' + ch)
-                                    esc = False
-                                else:
+            ws = sh.add_worksheet(title=sheet_name, rows=df.shape[0] + 10, cols=df.shape[1] + 5)
+        ws.clear()
+        ws.update([df.columns.values.tolist()] + df.fillna('').astype(str).values.tolist())
+        return True
+    except Exception as e:
+        log.exception('Failed to write worksheet')
+        raise RuntimeError(f'Failed to write worksheet {sheet_name}: {e}') from e
+
                                     if ch == '\\':
                                         esc = True
                                         # we will handle the next char in escaped branch
