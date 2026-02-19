@@ -34,8 +34,27 @@ def _get_credentials():
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
     ]
-    # Prefer JSON payload in env var (Streamlit Cloud secrets)
+    # Prefer JSON payload from environment variable or Streamlit secrets
+    # Streamlit Cloud typically exposes secrets via `st.secrets`, so check
+    # there as well if Streamlit is available.
     json_payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+    # Try common alternate names
+    if not json_payload:
+        json_payload = os.environ.get('GOOGLE_SERVICE_ACCOUNT') or os.environ.get('SERVICE_ACCOUNT_JSON')
+    # Try Streamlit secrets if present
+    if not json_payload:
+        try:
+            import streamlit as _st
+            # check several common keys that users may name their secret
+            for key in ('GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_JSON'):
+                if key in _st.secrets:
+                    json_payload = _st.secrets[key]
+                    break
+            # also allow nested secret like st.secrets['google']['service_account']
+            if not json_payload and 'google' in _st.secrets and 'service_account' in _st.secrets['google']:
+                json_payload = _st.secrets['google']['service_account']
+        except Exception:
+            pass
     if json_payload:
         try:
             info = json.loads(json_payload)
@@ -44,6 +63,14 @@ def _get_credentials():
             pass
     # Fallback to file path
     creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    # also look in Streamlit secrets for a path-like entry
+    if not creds_path:
+        try:
+            import streamlit as _st
+            if 'GOOGLE_APPLICATION_CREDENTIALS' in _st.secrets:
+                creds_path = _st.secrets['GOOGLE_APPLICATION_CREDENTIALS']
+        except Exception:
+            pass
     if creds_path and os.path.exists(creds_path):
         try:
             return Credentials.from_service_account_file(creds_path, scopes=scopes)
